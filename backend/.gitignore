@@ -1,0 +1,7 @@
+# Ignore local environment file containing credentials
+.env
+.env.*
+!.env.example
+*.env
+__pycache__/
+*.pyc
