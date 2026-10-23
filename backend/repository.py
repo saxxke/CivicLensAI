@@ -79,6 +79,17 @@ class IReportRepository(Protocol):
     async def upvote(self, report_id: str) -> Optional[ReportResponse]:
         ...
 
+    async def find_similar(
+        self,
+        category: str,
+        title: str,
+        description: str,
+        latitude: Optional[float] = None,
+        longitude: Optional[float] = None,
+        ward: Optional[str] = None,
+    ) -> List[ReportResponse]:
+        ...
+
     async def create_user(self, user_in: UserRegister, hashed_pw: str) -> UserProfileResponse:
         ...
 
@@ -208,6 +219,8 @@ class MongoReportRepository:
             upvotes=doc.get("upvotes", 0),
             image_url=doc.get("image_url"),
             user_id=doc.get("user_id"),
+            similar_to=doc.get("similar_to"),
+            similar_count=doc.get("similar_count", 0),
             created_at=doc["created_at"],
             updated_at=doc["updated_at"],
             is_mock_persistence=False,
@@ -235,12 +248,22 @@ class MongoReportRepository:
             "upvotes": 0,
             "image_url": report_in.image_url,
             "user_id": report_in.user_id,
+            "similar_to": report_in.similar_to,
+            "similar_count": 0,
             "created_at": now,
             "updated_at": now,
             "is_mock_persistence": False,
         }
 
         await self.reports_col.insert_one(doc)
+
+        # If this report is flagged as similar to an existing one, increment its similar_count
+        if report_in.similar_to:
+            await self.reports_col.update_one(
+                {"id": report_in.similar_to},
+                {"$inc": {"similar_count": 1}, "$set": {"updated_at": now}},
+            )
+
         return self._doc_to_response(doc)
 
     async def list_all(
@@ -307,6 +330,55 @@ class MongoReportRepository:
         if not updated_doc:
             return None
         return self._doc_to_response(updated_doc)
+
+    async def find_similar(
+        self,
+        category: str,
+        title: str,
+        description: str,
+        latitude: Optional[float] = None,
+        longitude: Optional[float] = None,
+        ward: Optional[str] = None,
+    ) -> List[ReportResponse]:
+        """
+        Returns open reports in the same category with keyword overlap.
+        Used for pre-submission duplicate detection.
+        """
+        stop_words = {"the", "and", "near", "on", "in", "at", "is", "a", "an", "of", "for", "to", "with", "from", "this", "that"}
+
+        def get_keywords(text: str) -> set:
+            import re as _re
+            words = _re.sub(r"[^a-z0-9\s]", " ", text.lower()).split()
+            return {w for w in words if len(w) > 2 and w not in stop_words}
+
+        input_words = get_keywords(f"{title} {description}")
+        if not input_words:
+            return []
+
+        # Query open reports in the same category
+        query: dict = {
+            "category": category,
+            "status": {"$nin": ["Resolved", "Rejected"]},
+        }
+        if ward:
+            query["ward"] = ward
+
+        candidates: List[ReportResponse] = []
+        async for doc in self.reports_col.find(query).sort("created_at", pymongo.DESCENDING).limit(100):
+            report_words = get_keywords(f"{doc.get('title', '')} {doc.get('description', '')} {doc.get('location', '')}")
+            match_count = len(input_words & report_words)
+
+            score = match_count * 2
+
+            # Proximity bonus
+            if latitude and longitude and doc.get("latitude") and doc.get("longitude"):
+                if abs(latitude - doc["latitude"]) < 0.005 and abs(longitude - doc["longitude"]) < 0.005:
+                    score += 4
+
+            if score >= 4:
+                candidates.append(self._doc_to_response(doc))
+
+        return candidates[:5]  # return at most 5 similar reports
 
     async def create_user(self, user_in: UserRegister, hashed_pw: str) -> UserProfileResponse:
         now = datetime.now(timezone.utc)
@@ -420,6 +492,20 @@ class UnavailableMongoRepository:
         )
 
     async def upvote(self, report_id: str) -> Optional[ReportResponse]:
+        raise RuntimeError(
+            f"MongoDB Atlas is not available: {self.reason}. "
+            "Please configure MONGODB_URI in backend/.env."
+        )
+
+    async def find_similar(
+        self,
+        category: str,
+        title: str,
+        description: str,
+        latitude: Optional[float] = None,
+        longitude: Optional[float] = None,
+        ward: Optional[str] = None,
+    ) -> List[ReportResponse]:
         raise RuntimeError(
             f"MongoDB Atlas is not available: {self.reason}. "
             "Please configure MONGODB_URI in backend/.env."

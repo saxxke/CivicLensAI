@@ -40,6 +40,7 @@ export interface ReportCreatePayload {
   suggested_priority?: SuggestedPriority;
   image_url?: string | null;
   user_id?: string | null;
+  similar_to?: string | null;
 }
 
 /**
@@ -59,6 +60,8 @@ export interface BackendReportResponse {
   upvotes?: number;
   image_url?: string | null;
   user_id?: string | null;
+  similar_to?: string | null;
+  similar_count?: number;
   created_at: string;
   updated_at: string;
   is_mock_persistence?: boolean;
@@ -385,6 +388,31 @@ export const apiClient = {
     return apiFetch<BackendReportResponse>(`/api/reports/${encodeURIComponent(reportId)}/upvote`, {
       method: 'PATCH',
     });
+  },
+
+  /**
+   * Find similar open reports for pre-submission duplicate check (GET /api/reports/similar)
+   */
+  async findSimilarReports(params: {
+    category: IssueCategory;
+    title: string;
+    description?: string;
+    latitude?: number | null;
+    longitude?: number | null;
+    ward?: string;
+  }): Promise<BackendReportResponse[]> {
+    const p = new URLSearchParams();
+    p.append('category', params.category);
+    p.append('title', params.title);
+    if (params.description) p.append('description', params.description);
+    if (params.latitude != null) p.append('latitude', String(params.latitude));
+    if (params.longitude != null) p.append('longitude', String(params.longitude));
+    if (params.ward) p.append('ward', params.ward);
+    try {
+      return await apiFetch<BackendReportResponse[]>(`/api/reports/similar?${p.toString()}`);
+    } catch {
+      return []; // non-critical — silently return empty if backend is unavailable
+    }
   },
 
   /**

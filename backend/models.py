@@ -44,6 +44,7 @@ class ReportCreate(BaseModel):
         description="Optional image attachment URL or data identifier",
     )
     user_id: Optional[str] = Field(default=None, description="Optional submitting user ID")
+    similar_to: Optional[str] = Field(default=None, description="ID of an existing similar report this may be a duplicate of")
 
 
 class ReportStatusUpdate(BaseModel):
@@ -64,6 +65,8 @@ class ReportResponse(BaseModel):
     upvotes: int = Field(default=0, description="Community highlight / upvote count")
     image_url: Optional[str] = None
     user_id: Optional[str] = None
+    similar_to: Optional[str] = Field(default=None, description="ID of an existing similar/parent report if this is a duplicate")
+    similar_count: int = Field(default=0, description="Number of similar/duplicate reports filed for the same issue")
     created_at: datetime
     updated_at: datetime
     is_mock_persistence: bool = Field(

@@ -1845,7 +1845,7 @@ export default function App() {
       return !r.ward || r.ward.toLowerCase() === officerWard.toLowerCase();
     });
 
-    // Five Core Telemetry Metrics for the Authorized Ward
+    // Six Core Telemetry Metrics for the Authorized Ward
     const totalWardIssues = scopedReports.length;
     const awaitingReviewCount = scopedReports.filter((r) => r.status === 'Reported').length;
     const highPriorityCount = scopedReports.filter((r) => r.suggestedPriority === 'High').length;
@@ -1854,6 +1854,36 @@ export default function App() {
     ).length;
     const resolvedCount = scopedReports.filter((r) => r.status === 'Resolved').length;
     const rejectedCount = scopedReports.filter((r) => r.status === 'Rejected').length;
+
+    // Detect groups of similar issues: cluster by category + overlapping title words
+    const stopWords = new Set(['the','and','near','on','in','at','is','a','an','of','for','to','with','from','this','that']);
+    const getKeywords = (s: string) => s.toLowerCase().replace(/[^a-z0-9\s]/g,' ').split(/\s+/).filter((w) => w.length > 2 && !stopWords.has(w));
+
+    // Build a map: originalId -> list of duplicates (reports that share category + 2+ keywords with an earlier report)
+    const processedIds = new Set<string>();
+    const duplicateGroups: Record<string, string[]> = {}; // originalId -> [dupId, ...]
+    const isDuplicate: Record<string, string> = {}; // dupId -> originalId
+
+    const sortedScoped = [...scopedReports].sort((a, b) => a.id.localeCompare(b.id)); // oldest first
+    for (let i = 0; i < sortedScoped.length; i++) {
+      const r = sortedScoped[i];
+      if (processedIds.has(r.id)) continue;
+      processedIds.add(r.id);
+      const rWords = new Set(getKeywords(`${r.title} ${r.description}`));
+      for (let j = i + 1; j < sortedScoped.length; j++) {
+        const s = sortedScoped[j];
+        if (processedIds.has(s.id)) continue;
+        if (s.category !== r.category) continue;
+        const sWords = getKeywords(`${s.title} ${s.description}`);
+        const matches = sWords.filter((w) => rWords.has(w)).length;
+        if (matches >= 2) {
+          processedIds.add(s.id);
+          isDuplicate[s.id] = r.id;
+          duplicateGroups[r.id] = duplicateGroups[r.id] || [];
+          duplicateGroups[r.id].push(s.id);
+        }
+      }
+    }
 
     // Filter queue according to selected tab
     const filteredQueue = scopedReports.filter((r) => {
@@ -1995,12 +2025,12 @@ export default function App() {
           </Text>
         </View>
 
-        {/* 5 Core Telemetry Metrics Cards */}
+        {/* 6 Core Telemetry Metrics Cards — 3-column grid */}
         <View style={styles.sectionHeaderRow}>
           <View>
-            <Text style={styles.sectionTitle}>Ward Telemetry & Telemetrics</Text>
+            <Text style={styles.sectionTitle}>Ward Command Metrics</Text>
             <Text style={styles.sectionCaption}>
-              Authorized jurisdiction metrics for {officerWard}
+              Live jurisdiction overview · {officerWard}
             </Text>
           </View>
           <View style={styles.sectionBadge}>
@@ -2009,96 +2039,76 @@ export default function App() {
         </View>
 
         <View style={styles.officerMetricsGrid}>
-          {/* 1. Total issues in officer's authorized ward */}
+          {/* 1. Total */}
           <TouchableOpacity
-            style={[styles.officerMetricCard, officerFilter === 'All' && styles.officerMetricCardActive]}
+            style={[styles.officerMetricCard, styles.officerMetricCard3col, officerFilter === 'All' && styles.officerMetricCardActive]}
             onPress={() => setOfficerFilter('All')}
             activeOpacity={0.8}
           >
             <View style={[styles.metricBar, { backgroundColor: '#0F172A' }]} />
-            <View style={styles.metricCardHeader}>
-              <Text style={styles.metricIcon}>📊</Text>
-              <Text style={styles.metricNumber}>{totalWardIssues}</Text>
-            </View>
-            <Text style={styles.metricTitle}>Total Issues</Text>
-            <Text style={styles.metricSub}>In Authorized Ward</Text>
+            <Text style={styles.metricIcon}>📊</Text>
+            <Text style={styles.metricNumber}>{totalWardIssues}</Text>
+            <Text style={styles.metricTitle}>Total</Text>
           </TouchableOpacity>
 
-          {/* 2. Issues awaiting review */}
+          {/* 2. Awaiting Review */}
           <TouchableOpacity
-            style={[
-              styles.officerMetricCard,
-              officerFilter === 'Reported' && styles.officerMetricCardActive,
-            ]}
+            style={[styles.officerMetricCard, styles.officerMetricCard3col, officerFilter === 'Reported' && styles.officerMetricCardActive]}
             onPress={() => setOfficerFilter('Reported')}
             activeOpacity={0.8}
           >
             <View style={[styles.metricBar, { backgroundColor: '#F59E0B' }]} />
-            <View style={styles.metricCardHeader}>
-              <Text style={styles.metricIcon}>⏳</Text>
-              <Text style={[styles.metricNumber, { color: '#B45309' }]}>
-                {awaitingReviewCount}
-              </Text>
-            </View>
-            <Text style={styles.metricTitle}>Awaiting Review</Text>
-            <Text style={styles.metricSub}>Requires Action</Text>
+            <Text style={styles.metricIcon}>⏳</Text>
+            <Text style={[styles.metricNumber, { color: '#B45309' }]}>{awaitingReviewCount}</Text>
+            <Text style={styles.metricTitle}>Pending</Text>
           </TouchableOpacity>
 
-          {/* 3. High-priority issues */}
+          {/* 3. High Priority */}
           <TouchableOpacity
-            style={[styles.officerMetricCard, officerFilter === 'High' && styles.officerMetricCardActive]}
+            style={[styles.officerMetricCard, styles.officerMetricCard3col, officerFilter === 'High' && styles.officerMetricCardActive]}
             onPress={() => setOfficerFilter('High')}
             activeOpacity={0.8}
           >
             <View style={[styles.metricBar, { backgroundColor: '#EF4444' }]} />
-            <View style={styles.metricCardHeader}>
-              <Text style={styles.metricIcon}>🚨</Text>
-              <Text style={[styles.metricNumber, { color: '#DC2626' }]}>
-                {highPriorityCount}
-              </Text>
-            </View>
-            <Text style={styles.metricTitle}>High Priority</Text>
-            <Text style={styles.metricSub}>Critical Hazards</Text>
+            <Text style={styles.metricIcon}>🚨</Text>
+            <Text style={[styles.metricNumber, { color: '#DC2626' }]}>{highPriorityCount}</Text>
+            <Text style={styles.metricTitle}>High Risk</Text>
           </TouchableOpacity>
 
-          {/* 4. Issues in progress */}
+          {/* 4. In Progress */}
           <TouchableOpacity
-            style={[
-              styles.officerMetricCard,
-              officerFilter === 'In Progress' && styles.officerMetricCardActive,
-            ]}
+            style={[styles.officerMetricCard, styles.officerMetricCard3col, officerFilter === 'In Progress' && styles.officerMetricCardActive]}
             onPress={() => setOfficerFilter('In Progress')}
             activeOpacity={0.8}
           >
             <View style={[styles.metricBar, { backgroundColor: '#0284C7' }]} />
-            <View style={styles.metricCardHeader}>
-              <Text style={styles.metricIcon}>🛠️</Text>
-              <Text style={[styles.metricNumber, { color: '#0284C7' }]}>
-                {inProgressCount}
-              </Text>
-            </View>
-            <Text style={styles.metricTitle}>In Progress</Text>
-            <Text style={styles.metricSub}>Field Crews Active</Text>
+            <Text style={styles.metricIcon}>🛠️</Text>
+            <Text style={[styles.metricNumber, { color: '#0284C7' }]}>{inProgressCount}</Text>
+            <Text style={styles.metricTitle}>Active</Text>
           </TouchableOpacity>
 
-          {/* 5. Resolved issues */}
+          {/* 5. Resolved */}
           <TouchableOpacity
-            style={[
-              styles.officerMetricCard,
-              officerFilter === 'Resolved' && styles.officerMetricCardActive,
-            ]}
+            style={[styles.officerMetricCard, styles.officerMetricCard3col, officerFilter === 'Resolved' && styles.officerMetricCardActive]}
             onPress={() => setOfficerFilter('Resolved')}
             activeOpacity={0.8}
           >
             <View style={[styles.metricBar, { backgroundColor: '#10B981' }]} />
-            <View style={styles.metricCardHeader}>
-              <Text style={styles.metricIcon}>✅</Text>
-              <Text style={[styles.metricNumber, { color: '#15803D' }]}>
-                {resolvedCount}
-              </Text>
-            </View>
+            <Text style={styles.metricIcon}>✅</Text>
+            <Text style={[styles.metricNumber, { color: '#15803D' }]}>{resolvedCount}</Text>
             <Text style={styles.metricTitle}>Resolved</Text>
-            <Text style={styles.metricSub}>Inspected & Done</Text>
+          </TouchableOpacity>
+
+          {/* 6. Rejected */}
+          <TouchableOpacity
+            style={[styles.officerMetricCard, styles.officerMetricCard3col, officerFilter === 'Rejected' && styles.officerMetricCardActive]}
+            onPress={() => setOfficerFilter('Rejected')}
+            activeOpacity={0.8}
+          >
+            <View style={[styles.metricBar, { backgroundColor: '#DC2626' }]} />
+            <Text style={styles.metricIcon}>❌</Text>
+            <Text style={[styles.metricNumber, { color: '#DC2626' }]}>{rejectedCount}</Text>
+            <Text style={styles.metricTitle}>Rejected</Text>
           </TouchableOpacity>
         </View>
 
@@ -2178,139 +2188,183 @@ export default function App() {
         {/* Actionable Report Cards with Direct Accept/Reject Controls */}
         {!isLoadingReports && filteredQueue.length > 0 && (
           <View style={styles.reportsList}>
-            {filteredQueue.map((report) => (
-              <View key={report.id} style={styles.officerCardWrapper}>
-                <TouchableOpacity
-                  style={styles.officerCardMain}
-                  activeOpacity={0.9}
-                  onPress={() => handleOpenReportDetails(report.id)}
-                >
-                  <View style={styles.reportCardHeader}>
-                    <View style={styles.iconAndTitle}>
-                      <View style={styles.categoryIconBox}>
-                        <Text style={styles.categoryIcon}>{report.categoryIcon || '📌'}</Text>
-                      </View>
-                      <View style={styles.reportTitleArea}>
-                        <View style={styles.titleRow}>
-                          <Text style={styles.reportRefTag}>{report.referenceNo}</Text>
-                          <Text style={styles.reportCategory}>{report.category}</Text>
+            {filteredQueue
+              .filter((r) => !isDuplicate[r.id]) // show originals (or non-duplicates) first
+              .map((report) => {
+                const dupIds = duplicateGroups[report.id] || [];
+                const totalCitizenSignals = (report.upvotes || 0) + dupIds.reduce((sum, id) => {
+                  const dup = scopedReports.find((r) => r.id === id);
+                  return sum + (dup?.upvotes || 0);
+                }, dupIds.length); // each duplicate submission itself counts as a signal
+
+                return (
+                  <View key={report.id} style={styles.officerCardWrapper}>
+                    <TouchableOpacity
+                      style={styles.officerCardMain}
+                      activeOpacity={0.9}
+                      onPress={() => handleOpenReportDetails(report.id)}
+                    >
+                      <View style={styles.reportCardHeader}>
+                        <View style={styles.iconAndTitle}>
+                          <View style={styles.categoryIconBox}>
+                            <Text style={styles.categoryIcon}>{report.categoryIcon || '📌'}</Text>
+                          </View>
+                          <View style={styles.reportTitleArea}>
+                            <View style={styles.titleRow}>
+                              <Text style={styles.reportRefTag}>{report.referenceNo}</Text>
+                              <Text style={styles.reportCategory}>{report.category}</Text>
+                            </View>
+                            <Text style={styles.reportTitle} numberOfLines={2}>
+                              {report.title}
+                            </Text>
+                          </View>
                         </View>
-                        <Text style={styles.reportTitle} numberOfLines={2}>
-                          {report.title}
+                        {renderStatusBadge(report.status)}
+                      </View>
+
+                      {report.description ? (
+                        <Text style={styles.reportDescriptionPreview} numberOfLines={2}>
+                          {report.description}
                         </Text>
+                      ) : null}
+
+                      {/* Priority & Community Signals Bar */}
+                      <View style={styles.officerCardMetaRow}>
+                        {report.suggestedPriority ? renderPriorityBadge(report.suggestedPriority) : null}
+                        <View style={styles.highlightsBadge}>
+                          <Text style={styles.highlightsBadgeText}>
+                            🔥 {totalCitizenSignals} citizen signal{totalCitizenSignals !== 1 ? 's' : ''}
+                          </Text>
+                        </View>
+                        {dupIds.length > 0 && (
+                          <View style={styles.duplicateGroupBadge}>
+                            <Text style={styles.duplicateGroupBadgeText}>
+                              ⚡ {dupIds.length} duplicate{dupIds.length > 1 ? 's' : ''}
+                            </Text>
+                          </View>
+                        )}
                       </View>
-                    </View>
-                    {renderStatusBadge(report.status)}
-                  </View>
 
-                  {report.description ? (
-                    <Text style={styles.reportDescriptionPreview} numberOfLines={2}>
-                      {report.description}
-                    </Text>
-                  ) : null}
+                      {/* Duplicate reports summary — shown below main card */}
+                      {dupIds.length > 0 && (
+                        <View style={styles.duplicateSummaryBox}>
+                          <Text style={styles.duplicateSummaryTitle}>
+                            Similar reports filed separately:
+                          </Text>
+                          {dupIds.map((dupId) => {
+                            const dup = scopedReports.find((r) => r.id === dupId);
+                            if (!dup) return null;
+                            return (
+                              <TouchableOpacity
+                                key={dupId}
+                                style={styles.duplicateSummaryRow}
+                                onPress={() => handleOpenReportDetails(dupId)}
+                                activeOpacity={0.75}
+                              >
+                                <Text style={styles.duplicateSummaryRef}>{dup.referenceNo}</Text>
+                                <Text style={styles.duplicateSummaryLabel} numberOfLines={1}>
+                                  {dup.title}
+                                </Text>
+                                <Text style={styles.duplicateSummaryArrow}>→</Text>
+                              </TouchableOpacity>
+                            );
+                          })}
+                        </View>
+                      )}
 
-                  {/* Priority & Community Highlights Bar */}
-                  <View style={styles.officerCardMetaRow}>
-                    {report.suggestedPriority ? renderPriorityBadge(report.suggestedPriority) : null}
-                    <View style={styles.highlightsBadge}>
-                      <Text style={styles.highlightsBadgeText}>
-                        🔥 {report.upvotes || 0} Citizens Highlighted
-                      </Text>
-                    </View>
-                  </View>
+                      {/* Photo if present */}
+                      {report.imageUri ? (
+                        <View style={styles.reportCardImageWrapper}>
+                          <Image
+                            source={{ uri: report.imageUri }}
+                            style={styles.reportCardImage}
+                            resizeMode="cover"
+                          />
+                          <View style={styles.imageOverlayTag}>
+                            <Text style={styles.imageOverlayTagText}>📸 Photo Attached</Text>
+                          </View>
+                        </View>
+                      ) : null}
 
-                  {/* Photo if present */}
-                  {report.imageUri ? (
-                    <View style={styles.reportCardImageWrapper}>
-                      <Image
-                        source={{ uri: report.imageUri }}
-                        style={styles.reportCardImage}
-                        resizeMode="cover"
-                      />
-                      <View style={styles.imageOverlayTag}>
-                        <Text style={styles.imageOverlayTagText}>📸 Photo Attached</Text>
+                      <View style={styles.cardDivider} />
+
+                      <View style={styles.reportCardFooter}>
+                        <View style={styles.footerLocationRow}>
+                          <Text style={styles.footerPinIcon}>📍</Text>
+                          <Text style={styles.footerLocationText} numberOfLines={1}>
+                            {report.location}
+                          </Text>
+                        </View>
+                        <View style={styles.verifiedTag}>
+                          <Text style={styles.verifiedText}>🕒 {report.createdAt}</Text>
+                        </View>
                       </View>
-                    </View>
-                  ) : null}
-
-                  <View style={styles.cardDivider} />
-
-                  <View style={styles.reportCardFooter}>
-                    <View style={styles.footerLocationRow}>
-                      <Text style={styles.footerPinIcon}>📍</Text>
-                      <Text style={styles.footerLocationText} numberOfLines={1}>
-                        {report.location}
-                      </Text>
-                    </View>
-                    <View style={styles.verifiedTag}>
-                      <Text style={styles.verifiedText}>🕒 {report.createdAt}</Text>
-                    </View>
-                  </View>
-                </TouchableOpacity>
-
-                {/* Direct Authority Decision Buttons Bar */}
-                <View style={styles.officerActionRow}>
-                  {report.status !== 'In Progress' && report.status !== 'Resolved' && (
-                    <TouchableOpacity
-                      style={styles.officerAcceptBtn}
-                      activeOpacity={0.8}
-                      onPress={() => handleUpdateStatus(report.id, 'In Progress')}
-                      disabled={isUpdatingStatus}
-                    >
-                      <Text style={styles.officerAcceptBtnText}>✓ Accept Issue</Text>
                     </TouchableOpacity>
-                  )}
 
-                  {report.status !== 'Rejected' && report.status !== 'Resolved' && (
-                    <TouchableOpacity
-                      style={styles.officerRejectBtn}
-                      activeOpacity={0.8}
-                      onPress={() => handleUpdateStatus(report.id, 'Rejected')}
-                      disabled={isUpdatingStatus}
-                    >
-                      <Text style={styles.officerRejectBtnText}>✕ Reject</Text>
-                    </TouchableOpacity>
-                  )}
+                    {/* Direct Authority Decision Buttons Bar */}
+                    <View style={styles.officerActionRow}>
+                      {report.status !== 'In Progress' && report.status !== 'Resolved' && (
+                        <TouchableOpacity
+                          style={styles.officerAcceptBtn}
+                          activeOpacity={0.8}
+                          onPress={() => handleUpdateStatus(report.id, 'In Progress')}
+                          disabled={isUpdatingStatus}
+                        >
+                          <Text style={styles.officerAcceptBtnText}>✓ Accept</Text>
+                        </TouchableOpacity>
+                      )}
 
-                  {report.status !== 'Resolved' && (
-                    <TouchableOpacity
-                      style={styles.officerResolveBtn}
-                      activeOpacity={0.8}
-                      onPress={() => handleUpdateStatus(report.id, 'Resolved')}
-                      disabled={isUpdatingStatus}
-                    >
-                      <Text style={styles.officerResolveBtnText}>🏁 Resolve</Text>
-                    </TouchableOpacity>
-                  )}
+                      {report.status !== 'Rejected' && report.status !== 'Resolved' && (
+                        <TouchableOpacity
+                          style={styles.officerRejectBtn}
+                          activeOpacity={0.8}
+                          onPress={() => handleUpdateStatus(report.id, 'Rejected')}
+                          disabled={isUpdatingStatus}
+                        >
+                          <Text style={styles.officerRejectBtnText}>✕ Reject</Text>
+                        </TouchableOpacity>
+                      )}
 
-                  {report.status === 'Resolved' && (
-                    <View style={styles.officerResolvedNotice}>
-                      <Text style={styles.officerResolvedNoticeText}>✓ Officially Resolved</Text>
-                    </View>
-                  )}
+                      {report.status !== 'Resolved' && (
+                        <TouchableOpacity
+                          style={styles.officerResolveBtn}
+                          activeOpacity={0.8}
+                          onPress={() => handleUpdateStatus(report.id, 'Resolved')}
+                          disabled={isUpdatingStatus}
+                        >
+                          <Text style={styles.officerResolveBtnText}>🏁 Resolve</Text>
+                        </TouchableOpacity>
+                      )}
 
-                  {report.status === 'Rejected' && (
-                    <View style={styles.officerRejectedNotice}>
-                      <Text style={styles.officerRejectedNoticeText}>✕ Rejected by Officer</Text>
+                      {report.status === 'Resolved' && (
+                        <View style={styles.officerResolvedNotice}>
+                          <Text style={styles.officerResolvedNoticeText}>✓ Officially Resolved</Text>
+                        </View>
+                      )}
+
+                      {report.status === 'Rejected' && (
+                        <View style={styles.officerRejectedNotice}>
+                          <Text style={styles.officerRejectedNoticeText}>✕ Rejected by Officer</Text>
+                          <TouchableOpacity
+                            style={styles.officerReopenLink}
+                            onPress={() => handleUpdateStatus(report.id, 'In Progress')}
+                          >
+                            <Text style={styles.officerReopenLinkText}>Reopen</Text>
+                          </TouchableOpacity>
+                        </View>
+                      )}
+
                       <TouchableOpacity
-                        style={styles.officerReopenLink}
-                        onPress={() => handleUpdateStatus(report.id, 'In Progress')}
+                        style={styles.officerInspectBtn}
+                        onPress={() => handleOpenReportDetails(report.id)}
+                        activeOpacity={0.7}
                       >
-                        <Text style={styles.officerReopenLinkText}>Reopen / Accept</Text>
+                        <Text style={styles.officerInspectText}>Details →</Text>
                       </TouchableOpacity>
                     </View>
-                  )}
-
-                  <TouchableOpacity
-                    style={styles.officerInspectBtn}
-                    onPress={() => handleOpenReportDetails(report.id)}
-                    activeOpacity={0.7}
-                  >
-                    <Text style={styles.officerInspectText}>Details →</Text>
-                  </TouchableOpacity>
-                </View>
-              </View>
-            ))}
+                  </View>
+                );
+              })}
           </View>
         )}
 
@@ -2545,6 +2599,7 @@ export default function App() {
    * "My Reports" Screen with Filter Tabs
    */
   const renderMyReportsScreen = () => {
+    const isOfficer = currentUser?.role === 'Ward Officer';
     const filteredReports = reports.filter((r) => {
       if (reportFilter === 'All') return true;
       return r.status === reportFilter;
@@ -2565,15 +2620,19 @@ export default function App() {
       >
         {/* Header */}
         <View style={styles.myReportsHeader}>
-          <Text style={styles.myReportsTitle}>My Civic Reports</Text>
+          <Text style={styles.myReportsTitle}>
+            {isOfficer ? 'All Ward Reports' : 'My Civic Reports'}
+          </Text>
           <Text style={styles.myReportsSubtitle}>
-            Track real-time progress, updates, and municipal response stages.
+            {isOfficer
+              ? 'Full archive of all civic reports across the ward — use Command tab for quick actions.'
+              : 'Track real-time progress, updates, and municipal response stages.'}
           </Text>
         </View>
 
         {/* Status Filter Pills */}
         <View style={styles.filterPillsRow}>
-          {(['All', 'Reported', 'Under Review', 'Resolved'] as const).map((tab) => {
+          {(['All', 'Reported', 'Under Review', 'In Progress', 'Resolved', 'Rejected'] as const).map((tab) => {
             const isSelected = reportFilter === tab;
             const count =
               tab === 'All' ? reports.length : reports.filter((r) => r.status === tab).length;
@@ -2581,7 +2640,7 @@ export default function App() {
               <TouchableOpacity
                 key={tab}
                 style={[styles.filterPill, isSelected && styles.filterPillActive]}
-                onPress={() => setReportFilter(tab)}
+                onPress={() => setReportFilter(tab as any)}
                 activeOpacity={0.75}
               >
                 <Text
@@ -2604,20 +2663,24 @@ export default function App() {
         {!isLoadingReports && filteredReports.length === 0 && (
           <View style={styles.emptyContainer}>
             <View style={styles.emptyIconCircle}>
-              <Text style={styles.emptyIcon}>📋</Text>
+              <Text style={styles.emptyIcon}>{isOfficer ? '🛡️' : '📋'}</Text>
             </View>
             <Text style={styles.emptyTitle}>No {reportFilter === 'All' ? '' : reportFilter} Reports</Text>
             <Text style={styles.emptySubtitle}>
-              {reportFilter === 'All'
-                ? "You haven't submitted any civic reports yet. Help make your streets safer today."
+              {filteredReports.length === 0 && reportFilter === 'All'
+                ? isOfficer
+                  ? 'No reports found in the system yet.'
+                  : "You haven't submitted any civic reports yet. Help make your streets safer today."
                 : `No reports currently in "${reportFilter}" state.`}
             </Text>
-            <TouchableOpacity
-              style={styles.emptyActionButton}
-              onPress={() => setIsReportingFlow(true)}
-            >
-              <Text style={styles.emptyActionText}>Submit New Report</Text>
-            </TouchableOpacity>
+            {!isOfficer && (
+              <TouchableOpacity
+                style={styles.emptyActionButton}
+                onPress={() => setIsReportingFlow(true)}
+              >
+                <Text style={styles.emptyActionText}>Submit New Report</Text>
+              </TouchableOpacity>
+            )}
           </View>
         )}
 
@@ -5359,18 +5422,17 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
 
-  /* Officer 5-Card Telemetry Grid */
+  /* Officer 6-Card Telemetry Grid — 3 columns */
   officerMetricsGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    gap: 10,
+    gap: 8,
     marginBottom: 24,
   },
   officerMetricCard: {
-    width: '48%',
     backgroundColor: '#FFFFFF',
-    borderRadius: 16,
-    padding: 14,
+    borderRadius: 14,
+    padding: 12,
     borderWidth: 1,
     borderColor: THEME.colors.slateBorder,
     shadowColor: '#0F172A',
@@ -5380,6 +5442,14 @@ const styles = StyleSheet.create({
     elevation: 2,
     position: 'relative',
     overflow: 'hidden',
+    alignItems: 'center',
+    justifyContent: 'center',
+    minHeight: 90,
+  },
+  officerMetricCard3col: {
+    // ~31% width for 3-column layout (100% - 2*8px gap) / 3
+    flexBasis: '31%',
+    flexGrow: 1,
   },
   officerMetricCardActive: {
     borderColor: THEME.colors.brandTeal,
@@ -5400,22 +5470,26 @@ const styles = StyleSheet.create({
     marginTop: 2,
   },
   metricIcon: {
-    fontSize: 18,
+    fontSize: 20,
+    marginBottom: 4,
   },
   metricNumber: {
-    fontSize: 22,
+    fontSize: 24,
     fontWeight: '900',
     color: THEME.colors.primaryNavy,
+    marginBottom: 2,
   },
   metricTitle: {
-    fontSize: 13,
-    fontWeight: '800',
+    fontSize: 11,
+    fontWeight: '700',
     color: THEME.colors.primaryNavy,
+    textAlign: 'center',
   },
   metricSub: {
-    fontSize: 11,
+    fontSize: 10,
     color: '#64748B',
     marginTop: 1,
+    textAlign: 'center',
   },
 
   /* Officer Queue Filter Row */
@@ -5483,6 +5557,67 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: '700',
     color: '#0F766E',
+  },
+
+  /* Duplicate group badge on officer card */
+  duplicateGroupBadge: {
+    backgroundColor: '#FEF3C7',
+    borderWidth: 1,
+    borderColor: '#FDE68A',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 8,
+  },
+  duplicateGroupBadgeText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#92400E',
+  },
+
+  /* Duplicate summary list inside officer card */
+  duplicateSummaryBox: {
+    marginTop: 8,
+    marginBottom: 4,
+    backgroundColor: '#FFFBEB',
+    borderWidth: 1,
+    borderColor: '#FDE68A',
+    borderRadius: 10,
+    padding: 10,
+  },
+  duplicateSummaryTitle: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#92400E',
+    marginBottom: 6,
+    textTransform: 'uppercase',
+    letterSpacing: 0.4,
+  },
+  duplicateSummaryRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingVertical: 4,
+    borderTopWidth: 1,
+    borderTopColor: '#FEF3C7',
+  },
+  duplicateSummaryRef: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#0F172A',
+    backgroundColor: '#E2E8F0',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+  },
+  duplicateSummaryLabel: {
+    flex: 1,
+    fontSize: 12,
+    color: '#475569',
+  },
+  duplicateSummaryArrow: {
+    fontSize: 12,
+    color: '#0D9488',
+    fontWeight: '700',
   },
   officerActionRow: {
     flexDirection: 'row',

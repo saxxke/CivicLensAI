@@ -223,6 +223,45 @@ async def get_me(user_payload: dict = Depends(get_current_user_payload)) -> User
 # REPORT ENDPOINTS
 # ==========================================
 
+@app.get(
+    "/api/reports/similar",
+    response_model=List[ReportResponse],
+    summary="Find similar open reports (pre-submission duplicate detection)",
+    tags=["Reports"],
+)
+async def find_similar_reports(
+    category: str = Query(..., description="Issue category to match against"),
+    title: str = Query(..., description="Issue title keywords"),
+    description: str = Query("", description="Issue description keywords"),
+    latitude: Optional[float] = Query(None, description="GPS latitude for proximity check"),
+    longitude: Optional[float] = Query(None, description="GPS longitude for proximity check"),
+    ward: Optional[str] = Query(None, description="Ward to scope search to"),
+) -> List[ReportResponse]:
+    """
+    Returns open reports that are similar to the given title/description/category.
+    Used by the mobile app before submission to surface potential duplicates.
+    """
+    try:
+        return await repository.find_similar(
+            category=category,
+            title=title,
+            description=description,
+            latitude=latitude,
+            longitude=longitude,
+            ward=ward,
+        )
+    except RuntimeError as re:
+        raise HTTPException(
+            status_code=http_status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(re),
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=http_status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Database error while searching similar reports: {str(e)[:120]}",
+        )
+
+
 @app.post(
     "/api/reports",
     response_model=ReportResponse,
@@ -237,6 +276,7 @@ async def create_report(
     """
     Submits a new civic report to persistent MongoDB Atlas storage.
     If authenticated, automatically associates report with the submitting user ID.
+    Accepts an optional similar_to field to link this report to an existing similar one.
     """
     try:
         if user_payload and not report_in.user_id:
