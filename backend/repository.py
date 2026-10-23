@@ -1,5 +1,6 @@
 import os
 import re
+import secrets
 from typing import List, Optional, Protocol, runtime_checkable
 from datetime import datetime, timezone
 import pymongo
@@ -12,9 +13,12 @@ from models import (
     IssueCategory,
     SuggestedPriority,
     DatabaseHealth,
+    UserRegister,
+    UserProfileResponse,
+    UserRole,
 )
 
-# Initial sample records for explicit / dev seeding
+# Initial sample records for explicit / dev seeding (with verified Downtown Ward 14 landmark coordinates)
 INITIAL_SAMPLE_REPORTS = [
     {
         "id": "CL-1001",
@@ -22,6 +26,8 @@ INITIAL_SAMPLE_REPORTS = [
         "description": "Deep road crater causing heavy vehicular slowdowns near the junction.",
         "category": IssueCategory.ROAD_DAMAGE,
         "location": "Main Road",
+        "latitude": 28.6139,
+        "longitude": 77.2090,
         "suggested_priority": SuggestedPriority.HIGH,
         "status": ReportStatus.REPORTED,
     },
@@ -31,6 +37,8 @@ INITIAL_SAMPLE_REPORTS = [
         "description": "Community bins spilling onto the pavement, needs scheduled pickup.",
         "category": IssueCategory.GARBAGE,
         "location": "Market Street",
+        "latitude": 28.6219,
+        "longitude": 77.2144,
         "suggested_priority": SuggestedPriority.MEDIUM,
         "status": ReportStatus.UNDER_REVIEW,
     },
@@ -40,6 +48,8 @@ INITIAL_SAMPLE_REPORTS = [
         "description": "Post pole flickering at night, creating dark spots near the park lane.",
         "category": IssueCategory.BROKEN_STREETLIGHT,
         "location": "Park Avenue",
+        "latitude": 28.6080,
+        "longitude": 77.2220,
         "suggested_priority": SuggestedPriority.LOW,
         "status": ReportStatus.RESOLVED,
     },
@@ -55,6 +65,8 @@ class IReportRepository(Protocol):
         self,
         category: Optional[IssueCategory] = None,
         status: Optional[ReportStatus] = None,
+        user_id: Optional[str] = None,
+        ward: Optional[str] = None,
     ) -> List[ReportResponse]:
         ...
 
@@ -62,6 +74,18 @@ class IReportRepository(Protocol):
         ...
 
     async def update_status(self, report_id: str, new_status: ReportStatus) -> Optional[ReportResponse]:
+        ...
+
+    async def upvote(self, report_id: str) -> Optional[ReportResponse]:
+        ...
+
+    async def create_user(self, user_in: UserRegister, hashed_pw: str) -> UserProfileResponse:
+        ...
+
+    async def get_user_by_email(self, email: str) -> Optional[dict]:
+        ...
+
+    async def get_user_by_id(self, user_id: str) -> Optional[UserProfileResponse]:
         ...
 
     async def check_health(self) -> DatabaseHealth:
@@ -78,8 +102,8 @@ class MongoReportRepository:
     Features:
     - Atomically generates safe sequential identifiers (e.g., CL-1004) using a counters collection.
     - Preserves existing report format, timestamps, and schema compatibility.
-    - Correctly handles ObjectId sanitization.
-    - Supports idempotent dev seeding without creating duplicate reports on server reload.
+    - Supports real user accounts and password hashes.
+    - Stores coordinates (latitude/longitude) for real heatmap rendering.
     """
 
     def __init__(self, uri: str, db_name: str = "civiclens"):
@@ -93,12 +117,13 @@ class MongoReportRepository:
         self.db = self.client[self.db_name]
         self.reports_col = self.db["reports"]
         self.counters_col = self.db["counters"]
+        self.users_col = self.db["users"]
 
     async def initialize(self):
         """Initializes collections and indexes once connection is verified."""
-        # Ensure index on custom report id (unique) and creation time for performant sorting
         await self.reports_col.create_index([("id", pymongo.ASCENDING)], unique=True)
         await self.reports_col.create_index([("created_at", pymongo.DESCENDING)])
+        await self.users_col.create_index([("email", pymongo.ASCENDING)], unique=True)
 
         # Ensure sequence counter initialized to at least 1003 if not present
         existing_counter = await self.counters_col.find_one({"_id": "report_id"})
@@ -118,10 +143,7 @@ class MongoReportRepository:
             )
 
     async def seed_sample_data_if_empty(self) -> int:
-        """
-        Seeds initial sample reports (CL-1001, CL-1002, CL-1003) if database has no reports.
-        Idempotent: Does not duplicate documents if already present.
-        """
+        """Seeds initial sample reports (CL-1001, CL-1002, CL-1003) if empty."""
         count = await self.reports_col.count_documents({})
         if count > 0:
             return 0
@@ -135,18 +157,22 @@ class MongoReportRepository:
                 "description": sample["description"],
                 "category": sample["category"].value if hasattr(sample["category"], "value") else sample["category"],
                 "location": sample["location"],
+                "latitude": sample.get("latitude"),
+                "longitude": sample.get("longitude"),
+                "ward": sample.get("ward", "Downtown Ward 14"),
                 "suggested_priority": (
                     sample["suggested_priority"].value
                     if hasattr(sample["suggested_priority"], "value")
                     else sample["suggested_priority"]
                 ),
                 "status": sample["status"].value if hasattr(sample["status"], "value") else sample["status"],
+                "upvotes": sample.get("upvotes", 0),
                 "image_url": None,
+                "user_id": None,
                 "created_at": now,
                 "updated_at": now,
                 "is_mock_persistence": False,
             }
-            # Use upsert to be safe against race conditions
             await self.reports_col.update_one(
                 {"id": sample["id"]},
                 {"$setOnInsert": doc},
@@ -157,10 +183,6 @@ class MongoReportRepository:
         return inserted_count
 
     async def _get_next_sequence_value(self) -> str:
-        """
-        Atomically increments and returns the next sequential report ID (e.g. 'CL-1004').
-        Safe under concurrent requests.
-        """
         result = await self.counters_col.find_one_and_update(
             {"_id": "report_id"},
             {"$inc": {"seq": 1}},
@@ -171,17 +193,21 @@ class MongoReportRepository:
         return f"CL-{seq_num}"
 
     def _doc_to_response(self, doc: dict) -> ReportResponse:
-        """Converts raw MongoDB document into validated ReportResponse."""
-        doc.pop("_id", None)  # Remove internal ObjectId from payload
+        doc.pop("_id", None)
         return ReportResponse(
             id=doc["id"],
             title=doc["title"],
             description=doc["description"],
             category=IssueCategory(doc["category"]),
             location=doc["location"],
+            latitude=doc.get("latitude"),
+            longitude=doc.get("longitude"),
+            ward=doc.get("ward", "Downtown Ward 14"),
             suggested_priority=SuggestedPriority(doc["suggested_priority"]),
             status=ReportStatus(doc["status"]),
+            upvotes=doc.get("upvotes", 0),
             image_url=doc.get("image_url"),
+            user_id=doc.get("user_id"),
             created_at=doc["created_at"],
             updated_at=doc["updated_at"],
             is_mock_persistence=False,
@@ -197,13 +223,18 @@ class MongoReportRepository:
             "description": report_in.description,
             "category": report_in.category.value if hasattr(report_in.category, "value") else report_in.category,
             "location": report_in.location,
+            "latitude": report_in.latitude,
+            "longitude": report_in.longitude,
+            "ward": report_in.ward or "Downtown Ward 14",
             "suggested_priority": (
                 (report_in.suggested_priority or SuggestedPriority.MEDIUM).value
                 if hasattr(report_in.suggested_priority or SuggestedPriority.MEDIUM, "value")
                 else (report_in.suggested_priority or SuggestedPriority.MEDIUM)
             ),
             "status": ReportStatus.REPORTED.value,
+            "upvotes": 0,
             "image_url": report_in.image_url,
+            "user_id": report_in.user_id,
             "created_at": now,
             "updated_at": now,
             "is_mock_persistence": False,
@@ -216,12 +247,18 @@ class MongoReportRepository:
         self,
         category: Optional[IssueCategory] = None,
         status: Optional[ReportStatus] = None,
+        user_id: Optional[str] = None,
+        ward: Optional[str] = None,
     ) -> List[ReportResponse]:
         query = {}
         if category:
             query["category"] = category.value if hasattr(category, "value") else category
         if status:
             query["status"] = status.value if hasattr(status, "value") else status
+        if user_id:
+            query["user_id"] = user_id
+        if ward:
+            query["ward"] = ward
 
         cursor = self.reports_col.find(query).sort("created_at", pymongo.DESCENDING)
         reports: List[ReportResponse] = []
@@ -230,7 +267,6 @@ class MongoReportRepository:
         return reports
 
     async def get_by_id(self, report_id: str) -> Optional[ReportResponse]:
-        # Case-insensitive match on report identifier (e.g. 'cl-1001' or 'CL-1001')
         pattern = re.compile(f"^{re.escape(report_id)}$", re.IGNORECASE)
         doc = await self.reports_col.find_one({"id": {"$regex": pattern}})
         if not doc:
@@ -255,6 +291,61 @@ class MongoReportRepository:
         if not updated_doc:
             return None
         return self._doc_to_response(updated_doc)
+
+    async def upvote(self, report_id: str) -> Optional[ReportResponse]:
+        pattern = re.compile(f"^{re.escape(report_id)}$", re.IGNORECASE)
+        now = datetime.now(timezone.utc)
+
+        updated_doc = await self.reports_col.find_one_and_update(
+            {"id": {"$regex": pattern}},
+            {
+                "$inc": {"upvotes": 1},
+                "$set": {"updated_at": now},
+            },
+            return_document=ReturnDocument.AFTER,
+        )
+        if not updated_doc:
+            return None
+        return self._doc_to_response(updated_doc)
+
+    async def create_user(self, user_in: UserRegister, hashed_pw: str) -> UserProfileResponse:
+        now = datetime.now(timezone.utc)
+        uid = f"USR-{secrets.token_hex(4).upper()}"
+        doc = {
+            "id": uid,
+            "name": user_in.name,
+            "email": user_in.email.strip().lower(),
+            "hashed_password": hashed_pw,
+            "role": user_in.role.value if hasattr(user_in.role, "value") else user_in.role,
+            "ward": user_in.ward,
+            "created_at": now,
+        }
+        await self.users_col.insert_one(doc)
+        return UserProfileResponse(
+            id=uid,
+            name=user_in.name,
+            email=doc["email"],
+            role=UserRole(doc["role"]),
+            ward=doc["ward"],
+            created_at=now,
+        )
+
+    async def get_user_by_email(self, email: str) -> Optional[dict]:
+        clean_email = email.strip().lower()
+        return await self.users_col.find_one({"email": clean_email})
+
+    async def get_user_by_id(self, user_id: str) -> Optional[UserProfileResponse]:
+        doc = await self.users_col.find_one({"id": user_id})
+        if not doc:
+            return None
+        return UserProfileResponse(
+            id=doc["id"],
+            name=doc["name"],
+            email=doc["email"],
+            role=UserRole(doc["role"]),
+            ward=doc["ward"],
+            created_at=doc["created_at"],
+        )
 
     async def check_health(self) -> DatabaseHealth:
         """Pings the database to verify active connection."""
@@ -308,6 +399,8 @@ class UnavailableMongoRepository:
         self,
         category: Optional[IssueCategory] = None,
         status: Optional[ReportStatus] = None,
+        user_id: Optional[str] = None,
+        ward: Optional[str] = None,
     ) -> List[ReportResponse]:
         raise RuntimeError(
             f"MongoDB Atlas is not available: {self.reason}. "
@@ -321,6 +414,30 @@ class UnavailableMongoRepository:
         )
 
     async def update_status(self, report_id: str, new_status: ReportStatus) -> Optional[ReportResponse]:
+        raise RuntimeError(
+            f"MongoDB Atlas is not available: {self.reason}. "
+            "Please configure MONGODB_URI in backend/.env."
+        )
+
+    async def upvote(self, report_id: str) -> Optional[ReportResponse]:
+        raise RuntimeError(
+            f"MongoDB Atlas is not available: {self.reason}. "
+            "Please configure MONGODB_URI in backend/.env."
+        )
+
+    async def create_user(self, user_in: UserRegister, hashed_pw: str) -> UserProfileResponse:
+        raise RuntimeError(
+            f"MongoDB Atlas is not available: {self.reason}. "
+            "Please configure MONGODB_URI in backend/.env."
+        )
+
+    async def get_user_by_email(self, email: str) -> Optional[dict]:
+        raise RuntimeError(
+            f"MongoDB Atlas is not available: {self.reason}. "
+            "Please configure MONGODB_URI in backend/.env."
+        )
+
+    async def get_user_by_id(self, user_id: str) -> Optional[UserProfileResponse]:
         raise RuntimeError(
             f"MongoDB Atlas is not available: {self.reason}. "
             "Please configure MONGODB_URI in backend/.env."

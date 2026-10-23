@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import List, Optional
 from datetime import datetime, timezone
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException, Query, status as http_status
+from fastapi import FastAPI, HTTPException, Query, Depends, status as http_status
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 
@@ -20,8 +20,19 @@ from models import (
     IssueCategory,
     ReportStatus,
     DatabaseHealth,
+    UserRegister,
+    UserLogin,
+    UserProfileResponse,
+    TokenResponse,
 )
 from repository import get_repository, IReportRepository, MongoReportRepository
+from auth import (
+    hash_password,
+    verify_password,
+    create_access_token,
+    get_current_user_payload,
+    get_optional_user_payload,
+)
 
 # Application environment
 APP_ENV = os.getenv("APP_ENV", "development")
@@ -111,6 +122,107 @@ async def get_health() -> HealthResponse:
     )
 
 
+# ==========================================
+# AUTHENTICATION ENDPOINTS
+# ==========================================
+
+@app.post(
+    "/api/auth/register",
+    response_model=TokenResponse,
+    status_code=http_status.HTTP_201_CREATED,
+    summary="Register a new citizen or officer account",
+    tags=["Authentication"],
+)
+async def register(user_in: UserRegister) -> TokenResponse:
+    """Creates a new user profile with salted bcrypt password hashing and returns a signed JWT."""
+    existing = await repository.get_user_by_email(user_in.email)
+    if existing:
+        raise HTTPException(
+            status_code=http_status.HTTP_409_CONFLICT,
+            detail="An account with this email address already exists.",
+        )
+
+    try:
+        hashed_pw = hash_password(user_in.password)
+        created_user = await repository.create_user(user_in, hashed_pw)
+        token, expires_in = create_access_token({
+            "sub": created_user.id,
+            "email": created_user.email,
+            "role": created_user.role.value if hasattr(created_user.role, "value") else created_user.role,
+            "name": created_user.name,
+            "ward": created_user.ward,
+        })
+        return TokenResponse(
+            access_token=token,
+            expires_in=expires_in,
+            user=created_user,
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=http_status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Registration failed: {str(e)[:120]}",
+        )
+
+
+@app.post(
+    "/api/auth/login",
+    response_model=TokenResponse,
+    summary="Log in with email and password",
+    tags=["Authentication"],
+)
+async def login(credentials: UserLogin) -> TokenResponse:
+    """Verifies credentials against MongoDB and issues a signed, expiring access token."""
+    user_doc = await repository.get_user_by_email(credentials.email)
+    if not user_doc or not verify_password(credentials.password, user_doc.get("hashed_password", "")):
+        raise HTTPException(
+            status_code=http_status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid email or password.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    user_profile = await repository.get_user_by_id(user_doc["id"])
+    if not user_profile:
+        raise HTTPException(
+            status_code=http_status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="User account record could not be loaded.",
+        )
+
+    token, expires_in = create_access_token({
+        "sub": user_profile.id,
+        "email": user_profile.email,
+        "role": user_profile.role.value if hasattr(user_profile.role, "value") else user_profile.role,
+        "name": user_profile.name,
+        "ward": user_profile.ward,
+    })
+
+    return TokenResponse(
+        access_token=token,
+        expires_in=expires_in,
+        user=user_profile,
+    )
+
+
+@app.get(
+    "/api/auth/me",
+    response_model=UserProfileResponse,
+    summary="Get current user profile",
+    tags=["Authentication"],
+)
+async def get_me(user_payload: dict = Depends(get_current_user_payload)) -> UserProfileResponse:
+    """Protected endpoint: Returns the profile of the authenticated user."""
+    user = await repository.get_user_by_id(user_payload["sub"])
+    if not user:
+        raise HTTPException(
+            status_code=http_status.HTTP_404_NOT_FOUND,
+            detail="User not found.",
+        )
+    return user
+
+
+# ==========================================
+# REPORT ENDPOINTS
+# ==========================================
+
 @app.post(
     "/api/reports",
     response_model=ReportResponse,
@@ -118,12 +230,17 @@ async def get_health() -> HealthResponse:
     summary="Create a civic issue report",
     tags=["Reports"],
 )
-async def create_report(report_in: ReportCreate) -> ReportResponse:
+async def create_report(
+    report_in: ReportCreate,
+    user_payload: Optional[dict] = Depends(get_optional_user_payload),
+) -> ReportResponse:
     """
     Submits a new civic report to persistent MongoDB Atlas storage.
-    Validates required fields and assigns a safe atomic sequential reference ID (e.g. CL-1004).
+    If authenticated, automatically associates report with the submitting user ID.
     """
     try:
+        if user_payload and not report_in.user_id:
+            report_in.user_id = user_payload.get("sub")
         created = await repository.create(report_in)
         return created
     except RuntimeError as re:
@@ -147,10 +264,12 @@ async def create_report(report_in: ReportCreate) -> ReportResponse:
 async def list_reports(
     category: Optional[IssueCategory] = Query(None, description="Filter reports by civic category"),
     status: Optional[ReportStatus] = Query(None, description="Filter reports by current workflow status"),
+    user_id: Optional[str] = Query(None, description="Filter reports submitted by a specific user"),
+    ward: Optional[str] = Query(None, description="Filter reports by ward"),
 ) -> List[ReportResponse]:
     """Retrieves all reports stored in MongoDB, sorted newest first."""
     try:
-        return await repository.list_all(category=category, status=status)
+        return await repository.list_all(category=category, status=status, user_id=user_id, ward=ward)
     except RuntimeError as re:
         raise HTTPException(
             status_code=http_status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -160,6 +279,25 @@ async def list_reports(
         raise HTTPException(
             status_code=http_status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Database error while listing reports: {str(e)[:120]}",
+        )
+
+
+@app.get(
+    "/api/reports/my",
+    response_model=List[ReportResponse],
+    summary="List reports created by the authenticated user",
+    tags=["Reports"],
+)
+async def list_my_reports(
+    user_payload: dict = Depends(get_current_user_payload),
+) -> List[ReportResponse]:
+    """Protected endpoint: Returns only the reports submitted by the logged-in user."""
+    try:
+        return await repository.list_all(user_id=user_payload["sub"])
+    except Exception as e:
+        raise HTTPException(
+            status_code=http_status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Database error retrieving user reports: {str(e)[:120]}",
         )
 
 
@@ -220,4 +358,34 @@ async def update_report_status(report_id: str, status_update: ReportStatusUpdate
         raise HTTPException(
             status_code=http_status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Database error while updating report status: {str(e)[:120]}",
+        )
+
+
+@app.patch(
+    "/api/reports/{report_id}/upvote",
+    response_model=ReportResponse,
+    summary="Highlight / upvote an existing report to escalate without duplicating",
+    tags=["Reports"],
+)
+async def upvote_report(report_id: str) -> ReportResponse:
+    """Increments community highlight / upvote count for a report in MongoDB."""
+    try:
+        updated = await repository.upvote(report_id)
+        if not updated:
+            raise HTTPException(
+                status_code=http_status.HTTP_404_NOT_FOUND,
+                detail=f"Report with ID '{report_id}' was not found to highlight.",
+            )
+        return updated
+    except HTTPException:
+        raise
+    except RuntimeError as re:
+        raise HTTPException(
+            status_code=http_status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(re),
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=http_status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Database error while highlighting report: {str(e)[:120]}",
         )

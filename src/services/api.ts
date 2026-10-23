@@ -4,8 +4,27 @@ import {
   SuggestedPriority,
   IssueAnalysisResult,
 } from './issueAnalysisService';
+import { authStorage } from './authStorage';
 
-export type ReportStatus = 'Reported' | 'Under Review' | 'Resolved';
+export type ReportStatus = 'Reported' | 'Under Review' | 'In Progress' | 'Resolved' | 'Rejected';
+
+export type UserRole = 'Citizen' | 'Ward Officer';
+
+export interface UserProfile {
+  id: string;
+  name: string;
+  email: string;
+  role: UserRole;
+  ward: string;
+  created_at?: string;
+}
+
+export interface AuthResponse {
+  access_token: string;
+  token_type: string;
+  expires_in: number;
+  user: UserProfile;
+}
 
 /**
  * Payload sent to POST /api/reports
@@ -15,8 +34,12 @@ export interface ReportCreatePayload {
   description: string;
   category: IssueCategory;
   location: string;
+  latitude?: number | null;
+  longitude?: number | null;
+  ward?: string;
   suggested_priority?: SuggestedPriority;
   image_url?: string | null;
+  user_id?: string | null;
 }
 
 /**
@@ -28,9 +51,14 @@ export interface BackendReportResponse {
   description: string;
   category: IssueCategory;
   location: string;
+  latitude?: number | null;
+  longitude?: number | null;
+  ward?: string;
   suggested_priority: SuggestedPriority;
   status: ReportStatus;
+  upvotes?: number;
   image_url?: string | null;
+  user_id?: string | null;
   created_at: string;
   updated_at: string;
   is_mock_persistence?: boolean;
@@ -59,9 +87,14 @@ export interface IssueReportItem {
   category: IssueCategory;
   description: string;
   location: string;
+  latitude?: number | null;
+  longitude?: number | null;
+  ward?: string;
   status: ReportStatus;
+  upvotes?: number;
   categoryIcon: string;
   imageUri?: string | null;
+  user_id?: string | null;
   createdAt: string;
   suggestedPriority?: SuggestedPriority;
   aiAnalysis?: IssueAnalysisResult | null;
@@ -89,11 +122,9 @@ export function getDefaultApiBaseUrl(): string {
     return envUrl.trim().replace(/\/+$/, '');
   }
 
-  if (Platform.OS === 'android') {
-    return 'http://10.0.2.2:8000';
-  }
-
-  return 'http://127.0.0.1:8000';
+  // Fallback LAN IP for your physical phone / Expo Go
+  // (Change to http://10.0.2.2:8000 if testing strictly on Android Emulator)
+  return 'http://172.16.36.247:8000';
 }
 
 export const API_BASE_URL = getDefaultApiBaseUrl();
@@ -114,19 +145,40 @@ export class ApiError extends Error {
 }
 
 /**
- * Helper to format raw backend timestamps for mobile UI display
+ * Robust helper to format raw backend timestamps for mobile UI display.
+ * Properly formats both date and time (e.g. "Today, 02:30 PM", "Yesterday, 04:15 PM", "Oct 23, 2026 • 02:30 PM").
  */
 export function formatReportDate(isoString?: string): string {
   if (!isoString) return 'Just now';
   try {
     const d = new Date(isoString);
     if (isNaN(d.getTime())) return isoString;
-    return d.toLocaleDateString(undefined, {
-      month: 'short',
-      day: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit',
-    });
+
+    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const month = months[d.getMonth()];
+    const day = d.getDate();
+    const year = d.getFullYear();
+
+    let hours = d.getHours();
+    const minutes = d.getMinutes().toString().padStart(2, '0');
+    const ampm = hours >= 12 ? 'PM' : 'AM';
+    hours = hours % 12;
+    hours = hours ? hours : 12;
+    const timeStr = `${hours.toString().padStart(2, '0')}:${minutes} ${ampm}`;
+
+    const now = new Date();
+    const isToday = now.getFullYear() === year && now.getMonth() === d.getMonth() && now.getDate() === day;
+    const yesterday = new Date(now);
+    yesterday.setDate(now.getDate() - 1);
+    const isYesterday = yesterday.getFullYear() === year && yesterday.getMonth() === d.getMonth() && yesterday.getDate() === day;
+
+    if (isToday) {
+      return `Today, ${timeStr}`;
+    }
+    if (isYesterday) {
+      return `Yesterday, ${timeStr}`;
+    }
+    return `${month} ${day}, ${year} • ${timeStr}`;
   } catch {
     return isoString;
   }
@@ -143,9 +195,14 @@ export function transformBackendReport(report: BackendReportResponse): IssueRepo
     category: report.category,
     description: report.description,
     location: report.location,
+    latitude: report.latitude ?? null,
+    longitude: report.longitude ?? null,
+    ward: report.ward || 'Downtown Ward 14',
     status: report.status,
+    upvotes: report.upvotes ?? 0,
     categoryIcon: CATEGORY_ICONS[report.category] || '📌',
     imageUri: report.image_url || null,
+    user_id: report.user_id || null,
     createdAt: formatReportDate(report.created_at),
     suggestedPriority: report.suggested_priority,
     aiAnalysis: null,
@@ -161,15 +218,21 @@ async function apiFetch<T>(endpoint: string, options: RequestInit = {}, timeoutM
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
+  const token = await authStorage.getToken();
+  const headers: Record<string, string> = {
+    Accept: 'application/json',
+    'Content-Type': 'application/json',
+    ...(options.headers as Record<string, string> || {}),
+  };
+  if (token && !headers.Authorization) {
+    headers.Authorization = `Bearer ${token}`;
+  }
+
   try {
     const response = await fetch(url, {
       ...options,
       signal: controller.signal,
-      headers: {
-        Accept: 'application/json',
-        'Content-Type': 'application/json',
-        ...(options.headers || {}),
-      },
+      headers,
     });
 
     clearTimeout(timer);
@@ -186,7 +249,6 @@ async function apiFetch<T>(endpoint: string, options: RequestInit = {}, timeoutM
           }
         }
       } catch {
-        // Fallback to response status text
         if (response.statusText) {
           errorMessage = `${response.statusText} (${response.status})`;
         }
@@ -223,15 +285,70 @@ export const apiClient = {
   },
 
   /**
+   * Register a new user
+   */
+  async register(payload: {
+    name: string;
+    email: string;
+    password: string;
+    role: UserRole;
+    ward?: string;
+  }): Promise<AuthResponse> {
+    const data = await apiFetch<AuthResponse>('/api/auth/register', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+    if (data.access_token) {
+      await authStorage.saveAuth(data.access_token, data.user);
+    }
+    return data;
+  },
+
+  /**
+   * Log in with credentials
+   */
+  async login(payload: { email: string; password: string }): Promise<AuthResponse> {
+    const data = await apiFetch<AuthResponse>('/api/auth/login', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+    if (data.access_token) {
+      await authStorage.saveAuth(data.access_token, data.user);
+    }
+    return data;
+  },
+
+  /**
+   * Fetch current authenticated user
+   */
+  async getMe(): Promise<UserProfile> {
+    return apiFetch<UserProfile>('/api/auth/me');
+  },
+
+  /**
    * Fetch all civic reports (GET /api/reports)
    */
-  async getReports(category?: IssueCategory, status?: ReportStatus): Promise<BackendReportResponse[]> {
+  async getReports(
+    category?: IssueCategory,
+    status?: ReportStatus,
+    userId?: string,
+    ward?: string
+  ): Promise<BackendReportResponse[]> {
     const params = new URLSearchParams();
     if (category) params.append('category', category);
     if (status) params.append('status', status);
+    if (userId) params.append('user_id', userId);
+    if (ward) params.append('ward', ward);
 
     const query = params.toString() ? `?${params.toString()}` : '';
     return apiFetch<BackendReportResponse[]>(`/api/reports${query}`);
+  },
+
+  /**
+   * Fetch only reports submitted by authenticated user
+   */
+  async getMyReports(): Promise<BackendReportResponse[]> {
+    return apiFetch<BackendReportResponse[]>('/api/reports/my');
   },
 
   /**
@@ -259,5 +376,21 @@ export const apiClient = {
       method: 'PATCH',
       body: JSON.stringify({ status: newStatus }),
     });
+  },
+
+  /**
+   * Highlight / upvote an existing report (PATCH /api/reports/{report_id}/upvote)
+   */
+  async upvoteReport(reportId: string): Promise<BackendReportResponse> {
+    return apiFetch<BackendReportResponse>(`/api/reports/${encodeURIComponent(reportId)}/upvote`, {
+      method: 'PATCH',
+    });
+  },
+
+  /**
+   * Log out and purge storage
+   */
+  async logout(): Promise<void> {
+    await authStorage.clearAuth();
   },
 };
