@@ -1,6 +1,6 @@
 # CivicLens AI — Expo + React Native Frontend & FastAPI Backend
 
-CivicLens AI is a mobile-first civic reporting and analysis application built with **React Native (Expo)**, **TypeScript**, and a **FastAPI** backend service.
+CivicLens AI is a mobile-first civic  reporting and analysis application built with **React Native (Expo)**, **TypeScript**, and a **FastAPI** backend service.
 
 ---
 
